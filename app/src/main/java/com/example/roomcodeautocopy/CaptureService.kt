@@ -62,6 +62,8 @@ class CaptureService : Service() {
     private var panelManager: WindowManager? = null
     @Volatile private var selectingRegion = false
     @Volatile private var lastCopied = ""
+    @Volatile private var latestResult = ""
+    @Volatile private var copyMode = "auto"
     @Volatile private var lastSeenAt = 0L
     @Volatile private var stopped = false
 
@@ -141,7 +143,7 @@ class CaptureService : Service() {
     }
 
     private fun processImage(image: Image, screenW: Int, screenH: Int) {
-        if (selectingRegion) {
+        if (stopped || paused || selectingRegion) {
             image.close()
             processing.set(false)
             return
@@ -211,13 +213,17 @@ class CaptureService : Service() {
                     val now = System.currentTimeMillis()
                     if (candidate != null) {
                         lastSeenAt = now
-                        if (candidate != lastCopied) {
+                        latestResult = candidate
+                        val currentCopyMode = prefs.getString("copy_mode", "auto") ?: "auto"
+                        copyMode = currentCopyMode
+                        if (currentCopyMode == "auto" && candidate != lastCopied) {
                             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                             clipboard.setPrimaryClip(ClipData.newPlainText("Screen Text", candidate))
                             lastCopied = candidate
                             Toast.makeText(applicationContext, "Copied!", Toast.LENGTH_SHORT).show()
                         }
                     } else if (now - lastSeenAt > 2500L) {
+                        latestResult = ""
                         lastCopied = ""
                     }
                 }
@@ -462,31 +468,104 @@ class CaptureService : Service() {
         }
         panel.addView(bubble)
 
-        fun menuButton(label: String, action: () -> Unit) {
-            menu.addView(Button(this).apply {
+        val statusLabel = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(8, 8, 8, 8)
+        }
+        menu.addView(statusLabel)
+
+        fun updateStatus() {
+            statusLabel.text = if (paused) {
+                "Scanning Paused"
+            } else {
+                "Scanning Active"
+            }
+        }
+
+        fun menuButton(label: String, action: () -> Unit): Button {
+            val button = Button(this).apply {
                 text = label
                 isAllCaps = false
                 textSize = 12f
                 setOnClickListener { action() }
-            })
+            }
+            menu.addView(button)
+            return button
         }
 
-        menuButton("Pause / Resume") {
+        val pauseButton = menuButton("", {})
+        fun updatePauseButton() {
+            pauseButton.text = if (paused) {
+                "Resume Scanning"
+            } else {
+                "Pause Scanning"
+            }
+            updateStatus()
+        }
+        pauseButton.setOnClickListener {
             paused = !paused
+            updatePauseButton()
             Toast.makeText(
                 this,
                 if (paused) "Scanning paused" else "Scanning resumed",
                 Toast.LENGTH_SHORT
             ).show()
         }
+        updatePauseButton()
 
-        menuButton("Mode") {
-            val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
-            val modes = listOf("numbers", "letters", "mixed", "text")
+        val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
+        val modes = listOf("numbers", "letters", "mixed", "text")
+        fun modeLabel(mode: String): String = when (mode) {
+            "numbers" -> "Numbers"
+            "letters" -> "Letters"
+            "text" -> "Full Text"
+            else -> "Mixed Code"
+        }
+
+        val modeButton = menuButton("", {})
+        fun updateModeButton() {
+            val current = prefs.getString("mode", "mixed") ?: "mixed"
+            modeButton.text = "Mode: ${modeLabel(current)}"
+        }
+        modeButton.setOnClickListener {
             val current = prefs.getString("mode", "mixed") ?: "mixed"
             val next = (modes.indexOf(current).coerceAtLeast(0) + 1) % modes.size
             prefs.edit().putString("mode", modes[next]).apply()
-            Toast.makeText(this, "Mode: ${modes[next]}", Toast.LENGTH_SHORT).show()
+            updateModeButton()
+            Toast.makeText(this, "Mode: ${modeLabel(modes[next])}", Toast.LENGTH_SHORT).show()
+        }
+        updateModeButton()
+
+        val copyModeButton = menuButton("", {})
+        fun updateCopyModeButton() {
+            val copyMode = prefs.getString("copy_mode", "auto") ?: "auto"
+            copyModeButton.text = if (copyMode == "auto") {
+                "Copy Mode: Auto Copy"
+            } else {
+                "Copy Mode: Manual Copy"
+            }
+        }
+        copyModeButton.setOnClickListener {
+            val current = prefs.getString("copy_mode", "auto") ?: "auto"
+            val next = if (current == "auto") "manual" else "auto"
+            prefs.edit().putString("copy_mode", next).apply()
+            copyMode = next
+            updateCopyModeButton()
+            Toast.makeText(this, "Copy mode: ${if (next == "auto") "Auto Copy" else "Manual Copy"}", Toast.LENGTH_SHORT).show()
+        }
+        updateCopyModeButton()
+
+        menuButton("Copy Result") {
+            val result = latestResult
+            if (result.isBlank()) {
+                Toast.makeText(this, "No text detected yet", Toast.LENGTH_SHORT).show()
+            } else {
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Screen Text", result))
+                lastCopied = result
+                Toast.makeText(this, "Result copied", Toast.LENGTH_SHORT).show()
+            }
         }
 
         menuButton("Region") {
