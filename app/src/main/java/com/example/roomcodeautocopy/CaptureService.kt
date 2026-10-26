@@ -9,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -21,8 +22,14 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Button
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -44,6 +51,9 @@ class CaptureService : Service() {
     private var handler: Handler? = null
     private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     private val processing = AtomicBoolean(false)
+    @Volatile private var paused = false
+    private var floatingPanel: View? = null
+    private var panelManager: WindowManager? = null
     @Volatile private var lastCopied = ""
     @Volatile private var lastSeenAt = 0L
     @Volatile private var stopped = false
@@ -114,6 +124,8 @@ class CaptureService : Service() {
             }
         }, handler)
 
+        showFloatingPanel()
+
         display = projection?.createVirtualDisplay(
             "RoomCodeAutoCopy", width, height, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -155,23 +167,41 @@ class CaptureService : Service() {
         try {
             recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
-                    if (stopped) return@addOnSuccessListener
-                    val text = result.text.uppercase(Locale.ROOT)
-                    // Conservative defaults: numeric code 6–12 digits, or alphanumeric 6–16
-                    // characters containing at least one letter and one digit.
-                    val tokens = Regex("""(?<![A-Z0-9])[A-Z0-9]{6,16}(?![A-Z0-9])""")
-                        .findAll(text).map { it.value }.distinct().toList()
-                    val candidate = tokens.firstOrNull { token ->
-                        val numericOnly = token.all { it.isDigit() } && token.length in 6..12
-                        val mixed = token.any { it.isDigit() } && token.any { it.isLetter() }
-                        numericOnly || mixed
+                    if (stopped || paused) return@addOnSuccessListener
+
+                    val rawText = result.text.trim()
+                    val text = rawText.uppercase(Locale.ROOT)
+                    val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
+                    val mode = prefs.getString("mode", "mixed") ?: "mixed"
+
+                    val tokens = Regex("""(?<![A-Z0-9])[A-Z0-9]{1,64}(?![A-Z0-9])""")
+                        .findAll(text)
+                        .map { it.value }
+                        .distinct()
+                        .toList()
+
+                    val candidate = when (mode) {
+                        "numbers" -> tokens.firstOrNull { token ->
+                            token.all { it.isDigit() }
+                        }
+                        "letters" -> tokens.firstOrNull { token ->
+                            token.all { it.isLetter() }
+                        }
+                        "mixed" -> tokens.firstOrNull { token ->
+                            token.any { it.isLetter() } && token.any { it.isDigit() }
+                        }
+                        "text" -> rawText.takeIf { it.isNotBlank() }
+                        else -> tokens.firstOrNull { token ->
+                            token.any { it.isLetter() } && token.any { it.isDigit() }
+                        }
                     }
+
                     val now = System.currentTimeMillis()
                     if (candidate != null) {
                         lastSeenAt = now
                         if (candidate != lastCopied) {
                             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Room Code", candidate))
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Screen Text", candidate))
                             lastCopied = candidate
                             Toast.makeText(applicationContext, "Copied!", Toast.LENGTH_SHORT).show()
                         }
@@ -189,6 +219,123 @@ class CaptureService : Service() {
         } catch (_: Exception) {
             if (!bitmap.isRecycled) bitmap.recycle()
             processing.set(false)
+        }
+    }
+
+
+    private fun showFloatingPanel() {
+        if (floatingPanel != null || Build.VERSION.SDK_INT < 23) return
+        if (!android.provider.Settings.canDrawOverlays(this)) return
+
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        panelManager = wm
+
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(12, 8, 12, 8)
+            setBackgroundColor(Color.argb(220, 25, 35, 55))
+        }
+
+        val title = TextView(this).apply {
+            text = "Screen Copier"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(4, 4, 4, 8)
+        }
+        panel.addView(title)
+
+        fun panelButton(label: String, action: () -> Unit) {
+            panel.addView(Button(this).apply {
+                text = label
+                isAllCaps = false
+                textSize = 12f
+                setOnClickListener { action() }
+            })
+        }
+
+        panelButton("Pause / Resume") {
+            paused = !paused
+            Toast.makeText(
+                this,
+                if (paused) "Scanning paused" else "Scanning resumed",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        panelButton("Mode") {
+            val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
+            val modes = listOf("numbers", "letters", "mixed", "text")
+            val current = prefs.getString("mode", "mixed") ?: "mixed"
+            val next = (modes.indexOf(current).coerceAtLeast(0) + 1) % modes.size
+            prefs.edit().putString("mode", modes[next]).apply()
+            Toast.makeText(this, "Mode: ${modes[next]}", Toast.LENGTH_SHORT).show()
+        }
+
+        panelButton("Region") {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        }
+
+        panelButton("Hide") {
+            try {
+                panelManager?.removeView(floatingPanel)
+            } catch (_: Exception) {}
+            floatingPanel = null
+        }
+
+        @Suppress("DEPRECATION")
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 20
+            y = 160
+        }
+
+        title.setOnTouchListener(object : View.OnTouchListener {
+            private var startX = 0
+            private var startY = 0
+            private var touchX = 0f
+            private var touchY = 0f
+
+            override fun onTouch(view: View, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = params.x
+                        startY = params.y
+                        touchX = event.rawX
+                        touchY = event.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = startX + (event.rawX - touchX).toInt()
+                        params.y = startY + (event.rawY - touchY).toInt()
+                        try { wm.updateViewLayout(panel, params) } catch (_: Exception) {}
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
+        try {
+            wm.addView(panel, params)
+            floatingPanel = panel
+        } catch (_: Exception) {
+            floatingPanel = null
         }
     }
 
@@ -214,6 +361,11 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         stopped = true
+        try {
+            floatingPanel?.let { panelManager?.removeView(it) }
+        } catch (_: Exception) {}
+        floatingPanel = null
+        panelManager = null
         try { display?.release() } catch (_: Exception) {}
         try { reader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
