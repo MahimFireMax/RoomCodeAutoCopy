@@ -10,6 +10,11 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.widget.FrameLayout
+import android.graphics.drawable.GradientDrawable
+import android.graphics.RectF
+import android.graphics.Paint
+import android.graphics.Canvas
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -25,6 +30,7 @@ import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Toast
 import android.widget.LinearLayout
@@ -54,6 +60,7 @@ class CaptureService : Service() {
     @Volatile private var paused = false
     private var floatingPanel: View? = null
     private var panelManager: WindowManager? = null
+    @Volatile private var selectingRegion = false
     @Volatile private var lastCopied = ""
     @Volatile private var lastSeenAt = 0L
     @Volatile private var stopped = false
@@ -134,6 +141,11 @@ class CaptureService : Service() {
     }
 
     private fun processImage(image: Image, screenW: Int, screenH: Int) {
+        if (selectingRegion) {
+            image.close()
+            processing.set(false)
+            return
+        }
         var padded: Bitmap? = null
         var cropped: Bitmap? = null
         try {
@@ -223,6 +235,194 @@ class CaptureService : Service() {
     }
 
 
+
+    private var regionOverlay: View? = null
+
+    private fun closeRegionSelector() {
+        selectingRegion = false
+        try {
+            regionOverlay?.let { panelManager?.removeView(it) }
+        } catch (_: Exception) {}
+        regionOverlay = null
+    }
+
+    private fun showRegionSelector() {
+        if (regionOverlay != null || Build.VERSION.SDK_INT < 23) return
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Allow overlay permission first", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        panelManager = wm
+        selectingRegion = true
+
+        var startX = 0f
+        var startY = 0f
+        var endX = 0f
+        var endY = 0f
+        var hasSelection = false
+
+        val drawingView = object : View(this) {
+            private val dimPaint = Paint().apply {
+                color = Color.argb(175, 0, 0, 0)
+                style = Paint.Style.FILL
+            }
+            private val clearPaint = Paint().apply {
+                color = Color.TRANSPARENT
+                style = Paint.Style.FILL
+                xfermode = android.graphics.PorterDuffXfermode(
+                    android.graphics.PorterDuff.Mode.CLEAR
+                )
+            }
+            private val borderPaint = Paint().apply {
+                color = Color.GREEN
+                style = Paint.Style.STROKE
+                strokeWidth = 4f
+                isAntiAlias = true
+            }
+            private val hintPaint = Paint().apply {
+                color = Color.WHITE
+                textSize = 42f
+                isAntiAlias = true
+            }
+
+            init {
+                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            }
+
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                canvas.drawColor(Color.TRANSPARENT)
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+                if (hasSelection) {
+                    val rect = RectF(
+                        minOf(startX, endX), minOf(startY, endY),
+                        maxOf(startX, endX), maxOf(startY, endY)
+                    )
+                    canvas.drawRect(rect, clearPaint)
+                    canvas.drawRect(rect, borderPaint)
+                } else {
+                    canvas.drawText("Drag to select an area", 30f, 90f, hintPaint)
+                }
+            }
+
+            override fun onTouchEvent(event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = event.x.coerceIn(0f, width.toFloat())
+                        startY = event.y.coerceIn(0f, height.toFloat())
+                        endX = startX
+                        endY = startY
+                        hasSelection = true
+                        invalidate()
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        endX = event.x.coerceIn(0f, width.toFloat())
+                        endY = event.y.coerceIn(0f, height.toFloat())
+                        invalidate()
+                        return true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        endX = event.x.coerceIn(0f, width.toFloat())
+                        endY = event.y.coerceIn(0f, height.toFloat())
+                        invalidate()
+                        return true
+                    }
+                }
+                return true
+            }
+
+            fun saveSelection(): Boolean {
+                val left = minOf(startX, endX)
+                val top = minOf(startY, endY)
+                val right = maxOf(startX, endX)
+                val bottom = maxOf(startY, endY)
+                if (!hasSelection || width <= 0 || height <= 0 ||
+                    right - left < 20f || bottom - top < 20f
+                ) return false
+
+                val x = (left * 100f / width).toInt().coerceIn(0, 99)
+                val y = (top * 100f / height).toInt().coerceIn(0, 99)
+                val w = ( (right - left) * 100f / width).toInt().coerceIn(1, 100 - x)
+                val h = ( (bottom - top) * 100f / height).toInt().coerceIn(1, 100 - y)
+
+                getSharedPreferences("region", Context.MODE_PRIVATE).edit()
+                    .putInt("x", x).putInt("y", y)
+                    .putInt("w", w).putInt("h", h).apply()
+                return true
+            }
+        }
+
+        val root = FrameLayout(this)
+        root.addView(
+            drawingView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(12, 8, 12, 8)
+            setBackgroundColor(Color.argb(235, 25, 35, 55))
+        }
+
+        val cancel = Button(this).apply {
+            text = "Cancel"
+            isAllCaps = false
+            setOnClickListener { closeRegionSelector() }
+        }
+        val confirm = Button(this).apply {
+            text = "Confirm"
+            isAllCaps = false
+            setOnClickListener {
+                if (drawingView.saveSelection()) {
+                    closeRegionSelector()
+                    Toast.makeText(this@CaptureService, "Region saved", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this@CaptureService, "Drag a larger rectangle first", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        actions.addView(cancel)
+        actions.addView(confirm)
+
+        val actionParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        )
+        root.addView(actions, actionParams)
+
+        @Suppress("DEPRECATION")
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+
+        try {
+            wm.addView(root, params)
+            regionOverlay = root
+        } catch (e: Exception) {
+            selectingRegion = false
+            regionOverlay = null
+            Toast.makeText(this, "Could not open region selector", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun showFloatingPanel() {
         if (floatingPanel != null || Build.VERSION.SDK_INT < 23) return
         if (!android.provider.Settings.canDrawOverlays(this)) return
@@ -232,21 +432,38 @@ class CaptureService : Service() {
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 8, 12, 8)
-            setBackgroundColor(Color.argb(220, 25, 35, 55))
+            setPadding(6, 6, 6, 6)
+            setBackgroundColor(Color.TRANSPARENT)
         }
 
-        val title = TextView(this).apply {
-            text = "Screen Copier"
-            textSize = 14f
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(10, 8, 10, 8)
+            setBackgroundColor(Color.argb(230, 25, 35, 55))
+            visibility = View.GONE
+        }
+
+        val bubble = TextView(this).apply {
+            text = "●"
+            textSize = 26f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(4, 4, 4, 8)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.rgb(25, 110, 220))
+                setStroke(2, Color.WHITE)
+            }
+            contentDescription = "Screen Copier controls"
+            val size = (52 * resources.displayMetrics.density).toInt()
+            layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                gravity = Gravity.END
+                bottomMargin = 8
+            }
         }
-        panel.addView(title)
+        panel.addView(bubble)
 
-        fun panelButton(label: String, action: () -> Unit) {
-            panel.addView(Button(this).apply {
+        fun menuButton(label: String, action: () -> Unit) {
+            menu.addView(Button(this).apply {
                 text = label
                 isAllCaps = false
                 textSize = 12f
@@ -254,7 +471,7 @@ class CaptureService : Service() {
             })
         }
 
-        panelButton("Pause / Resume") {
+        menuButton("Pause / Resume") {
             paused = !paused
             Toast.makeText(
                 this,
@@ -263,7 +480,7 @@ class CaptureService : Service() {
             ).show()
         }
 
-        panelButton("Mode") {
+        menuButton("Mode") {
             val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
             val modes = listOf("numbers", "letters", "mixed", "text")
             val current = prefs.getString("mode", "mixed") ?: "mixed"
@@ -272,18 +489,19 @@ class CaptureService : Service() {
             Toast.makeText(this, "Mode: ${modes[next]}", Toast.LENGTH_SHORT).show()
         }
 
-        panelButton("Region") {
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
+        menuButton("Region") {
+            menu.visibility = View.GONE
+            showRegionSelector()
         }
 
-        panelButton("Hide") {
-            try {
-                panelManager?.removeView(floatingPanel)
-            } catch (_: Exception) {}
-            floatingPanel = null
+        menuButton("Hide") {
+            menu.visibility = View.GONE
+        }
+
+        panel.addView(menu)
+
+        bubble.setOnClickListener {
+            menu.visibility = if (menu.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
 
         @Suppress("DEPRECATION")
@@ -305,11 +523,12 @@ class CaptureService : Service() {
             y = 160
         }
 
-        title.setOnTouchListener(object : View.OnTouchListener {
+        bubble.setOnTouchListener(object : View.OnTouchListener {
             private var startX = 0
             private var startY = 0
             private var touchX = 0f
             private var touchY = 0f
+            private var moved = false
 
             override fun onTouch(view: View, event: MotionEvent): Boolean {
                 when (event.action) {
@@ -318,14 +537,25 @@ class CaptureService : Service() {
                         startY = params.y
                         touchX = event.rawX
                         touchY = event.rawY
+                        moved = false
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        params.x = startX + (event.rawX - touchX).toInt()
-                        params.y = startY + (event.rawY - touchY).toInt()
-                        try { wm.updateViewLayout(panel, params) } catch (_: Exception) {}
+                        val dx = event.rawX - touchX
+                        val dy = event.rawY - touchY
+                        if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) moved = true
+                        if (moved) {
+                            params.x = startX + dx.toInt()
+                            params.y = startY + dy.toInt()
+                            try { wm.updateViewLayout(panel, params) } catch (_: Exception) {}
+                        }
                         return true
                     }
+                    MotionEvent.ACTION_UP -> {
+                        if (!moved) view.performClick()
+                        return true
+                    }
+                    MotionEvent.ACTION_CANCEL -> return true
                 }
                 return false
             }
