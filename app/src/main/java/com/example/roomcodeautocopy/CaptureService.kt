@@ -438,20 +438,20 @@ class CaptureService : Service() {
 
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(6, 6, 6, 6)
+            setPadding(10, 10, 10, 10)
             setBackgroundColor(Color.TRANSPARENT)
         }
 
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(10, 8, 10, 8)
-            setBackgroundColor(Color.argb(230, 25, 35, 55))
+            setPadding(14, 12, 14, 12)
+            setBackgroundColor(Color.argb(245, 18, 28, 48))
             visibility = View.GONE
         }
 
         val bubble = TextView(this).apply {
-            text = "●"
-            textSize = 26f
+            text = "SC"
+            textSize = 21f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             background = GradientDrawable().apply {
@@ -460,7 +460,7 @@ class CaptureService : Service() {
                 setStroke(2, Color.WHITE)
             }
             contentDescription = "Screen Copier controls"
-            val size = (52 * resources.displayMetrics.density).toInt()
+            val size = (58 * resources.displayMetrics.density).toInt()
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
                 gravity = Gravity.END
                 bottomMargin = 8
@@ -469,7 +469,7 @@ class CaptureService : Service() {
         panel.addView(bubble)
 
         val statusLabel = TextView(this).apply {
-            textSize = 13f
+            textSize = 15f
             setTextColor(Color.WHITE)
             setPadding(8, 8, 8, 8)
         }
