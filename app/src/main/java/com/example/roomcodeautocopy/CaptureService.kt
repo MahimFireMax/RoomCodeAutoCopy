@@ -444,8 +444,16 @@ class CaptureService : Service() {
 
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(14, 12, 14, 12)
-            setBackgroundColor(Color.argb(245, 18, 28, 48))
+            setPadding(12, 8, 12, 8)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(248, 18, 28, 48))
+                cornerRadius = 14 * resources.displayMetrics.density
+                setStroke((2 * resources.displayMetrics.density).toInt(), Color.rgb(75, 160, 255))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                (280 * resources.displayMetrics.density).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             visibility = View.GONE
         }
 
@@ -469,9 +477,9 @@ class CaptureService : Service() {
         panel.addView(bubble)
 
         val statusLabel = TextView(this).apply {
-            textSize = 15f
-            setTextColor(Color.WHITE)
-            setPadding(8, 8, 8, 8)
+            textSize = 14f
+            setTextColor(Color.rgb(220, 238, 255))
+            setPadding(8, 4, 8, 6)
         }
         menu.addView(statusLabel)
 
@@ -487,7 +495,10 @@ class CaptureService : Service() {
             val button = Button(this).apply {
                 text = label
                 isAllCaps = false
-                textSize = 12f
+                textSize = 13f
+                minHeight = (40 * resources.displayMetrics.density).toInt()
+                minimumHeight = (40 * resources.displayMetrics.density).toInt()
+                setPadding(8, 0, 8, 0)
                 setOnClickListener { action() }
             }
             menu.addView(button)
