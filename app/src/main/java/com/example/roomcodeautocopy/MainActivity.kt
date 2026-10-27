@@ -3,6 +3,7 @@ package com.example.roomcodeautocopy
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.Settings
 import android.media.projection.MediaProjectionManager
@@ -25,6 +26,15 @@ class MainActivity : Activity() {
     private lateinit var wField: EditText
     private lateinit var hField: EditText
     private lateinit var modeSpinner: Spinner
+    private lateinit var regionPrefs: SharedPreferences
+    private var syncingRegionFields = false
+
+    private val regionPrefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { shared, key ->
+            if (key == "x" || key == "y" || key == "w" || key == "h") {
+                runOnUiThread { refreshRegionFields(shared) }
+            }
+        }
 
     private val modeKeys = listOf("numbers", "letters", "mixed", "text")
     private val modeLabels = listOf(
@@ -38,6 +48,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val prefs = getSharedPreferences("region", Context.MODE_PRIVATE)
+        regionPrefs = prefs
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(22, 24, 22, 24)
@@ -101,6 +112,13 @@ class MainActivity : Activity() {
         hField = field("Height %", prefs.getInt("h", 80).toString())
         listOf(xField, yField, wField, hField).forEach { root.addView(it) }
 
+        listOf(xField, yField, wField, hField).forEach { field ->
+            field.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus && !syncingRegionFields) saveRegionIfValid()
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(regionPrefsListener)
+
         root.addView(button("Save Region") {
             val x = xField.intOrNull()
             val y = yField.intOrNull()
@@ -152,6 +170,46 @@ class MainActivity : Activity() {
             addView(root)
         }
         setContentView(scroll)
+    }
+
+    private fun refreshRegionFields(prefs: SharedPreferences) {
+        if (!::xField.isInitialized || !::yField.isInitialized ||
+            !::wField.isInitialized || !::hField.isInitialized) return
+
+        val values = listOf(
+            prefs.getInt("x", 10), prefs.getInt("y", 10),
+            prefs.getInt("w", 80), prefs.getInt("h", 80)
+        )
+        syncingRegionFields = true
+        try {
+            listOf(xField, yField, wField, hField).zip(values).forEach { (field, value) ->
+                val text = value.toString()
+                if (field.text.toString() != text) field.setText(text)
+            }
+        } finally {
+            syncingRegionFields = false
+        }
+    }
+
+    private fun saveRegionIfValid() {
+        val x = xField.intOrNull()
+        val y = yField.intOrNull()
+        val w = wField.intOrNull()
+        val h = hField.intOrNull()
+        if (x == null || y == null || w == null || h == null ||
+            x < 0 || y < 0 || w < 1 || h < 1 ||
+            x + w > 100 || y + h > 100
+        ) return
+
+        regionPrefs.edit().putInt("x", x).putInt("y", y)
+            .putInt("w", w).putInt("h", h).apply()
+    }
+
+    override fun onDestroy() {
+        if (::regionPrefs.isInitialized) {
+            regionPrefs.unregisterOnSharedPreferenceChangeListener(regionPrefsListener)
+        }
+        super.onDestroy()
     }
 
     private fun button(label: String, action: () -> Unit) =
